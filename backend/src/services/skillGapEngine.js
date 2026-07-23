@@ -43,14 +43,16 @@ export function calculateSkillGap(userSkills, jobSkills) {
   // Weighted skill match (0-100)
   const skillMatchPercent = totalWeight > 0 ? (earnedScore / totalWeight) * 100 : 0
 
-  // Final match score — applying 60% weight for skill match (20%+20% for experience/goals added later)
-  const matchScore = Math.round(skillMatchPercent * 0.6 + 20 + 20)  // 20+20 = baseline for non-implemented components
+  // Final match score — based purely on actual skill matches
+  // Future: can add experience (20%) and goal alignment (20%) when implemented
+  // For now: skillMatchPercent * 1.0 for accurate representation
+  const matchScore = Math.round(skillMatchPercent)
 
   // Sort missing by weight desc (most important first)
   missingSkills.sort((a, b) => b.weight - a.weight)
 
   return {
-    matchScore: Math.min(matchScore, 100),
+    matchScore: Math.max(0, Math.min(matchScore, 100)),
     matchedSkills,
     missingSkills
   }

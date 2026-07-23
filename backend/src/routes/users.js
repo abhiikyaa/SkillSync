@@ -7,7 +7,7 @@ import { supabase } from '../lib/supabase.js'
 const router  = Router()
 const upload  = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },   // 5 MB
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const allowed = ['application/pdf', 'application/msword',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document']
@@ -44,41 +44,120 @@ router.post('/resume', requireAuth, upload.single('resume'), async (req, res) =>
   if (!req.file) return res.status(400).json({ message: 'No file uploaded or invalid type' })
 
   // 1. Store file in Supabase Storage
-  const filename = `${req.user.id}/resume-${Date.now()}.pdf`
+  const ext = req.file.mimetype === 'application/pdf' ? '.pdf' : '.docx'
+  const filename = `${req.user.id}/resume-${Date.now()}${ext}`
   const { error: uploadErr } = await supabase.storage
     .from('resumes')
     .upload(filename, req.file.buffer, { contentType: req.file.mimetype, upsert: true })
-  if (uploadErr) return res.status(500).json({ message: 'Storage upload failed' })
+  if (uploadErr) {
+    console.error('Resume upload error:', uploadErr)
+    return res.status(500).json({ message: `Storage upload failed: ${uploadErr.message}` })
+  }
 
-  // 2. Extract skills from resume text
-  const extractedSkills = await extractSkillsFromResume(req.file.buffer)
+  // 2. Extract skills from resume text via AI
+  let extractedSkills = []
+  try {
+    extractedSkills = await extractSkillsFromResume(req.file.buffer)
+    console.log(`[Resume] AI extracted ${extractedSkills.length} skills:`, extractedSkills.map(s => s.name))
+  } catch (err) {
+    console.error('Skill extraction error:', err)
+  }
 
-  // 3. Save extracted skills to user_skills table
+  // 3. Match extracted skill names against the skills table
+  //    Uses case-insensitive matching (ilike) so "node.js" matches "Node.js"
   if (extractedSkills.length > 0) {
-    // Look up skill IDs from skills table
-    const { data: skillRows } = await supabase
-      .from('skills')
-      .select('id, skill_name')
-      .in('skill_name', extractedSkills.map(s => s.name))
+    try {
+      // Fetch ALL skills from DB once
+      const { data: allSkills, error: skillErr } = await supabase
+        .from('skills')
+        .select('id, skill_name')
 
-    const inserts = skillRows?.map(row => ({
-      user_id:     req.user.id,
-      skill_id:    row.id,
-      proficiency: 1,      // default Beginner
-      last_used:   new Date()
-    })) || []
+      if (skillErr) throw skillErr
 
-    if (inserts.length > 0) {
-      await supabase.from('user_skills').upsert(inserts, { onConflict: 'user_id,skill_id' })
+      // Build a lowercase map for fuzzy matching
+      const skillMap = new Map(
+        allSkills.map(s => [s.skill_name.toLowerCase().trim(), s])
+      )
+
+      // Also build variations: "node.js" -> "nodejs", "vue.js" -> "vue" etc.
+      const normalize = name => name.toLowerCase().trim()
+        .replace(/\.js$/, '')     // react.js -> react
+        .replace(/\s+/g, '')      // remove spaces
+
+      const normalizedMap = new Map(
+        allSkills.map(s => [normalize(s.skill_name), s])
+      )
+
+      // Match each extracted skill
+      const matchedSkillRows = []
+      const unmatchedSkills = []
+
+      for (const extracted of extractedSkills) {
+        const extractedLower = extracted.name.toLowerCase().trim()
+        const extractedNorm = normalize(extracted.name)
+
+        // Try exact lowercase match first
+        let match = skillMap.get(extractedLower)
+
+        // Try normalized match (removes .js suffix, spaces)
+        if (!match) match = normalizedMap.get(extractedNorm)
+
+        // Try partial match — DB skill name contains extracted name
+        if (!match) {
+          match = allSkills.find(s =>
+            s.skill_name.toLowerCase().includes(extractedLower) ||
+            extractedLower.includes(s.skill_name.toLowerCase())
+          )
+        }
+
+        if (match) {
+          matchedSkillRows.push(match)
+        } else {
+          unmatchedSkills.push(extracted.name)
+        }
+      }
+
+      console.log(`[Resume] Matched ${matchedSkillRows.length}/${extractedSkills.length} skills to DB`)
+      if (unmatchedSkills.length > 0) {
+        console.log(`[Resume] Unmatched skills (not in DB taxonomy):`, unmatchedSkills)
+      }
+
+      // Insert matched skills into user_skills
+      if (matchedSkillRows.length > 0) {
+        const inserts = matchedSkillRows.map(row => ({
+          user_id:     req.user.id,
+          skill_id:    row.id,
+          proficiency: 2,       // default Intermediate (more realistic than Beginner)
+          last_used:   new Date()
+        }))
+
+        const { error: upsertErr } = await supabase
+          .from('user_skills')
+          .upsert(inserts, { onConflict: 'user_id,skill_id' })
+
+        if (upsertErr) throw upsertErr
+        console.log(`[Resume] Saved ${inserts.length} skills to user_skills`)
+      }
+
+    } catch (err) {
+      console.error('Skill save error:', err)
     }
   }
 
   // 4. Update profile with resume URL
-  await supabase.from('profiles')
-    .update({ resume_url: filename })
-    .eq('id', req.user.id)
+  try {
+    await supabase.from('profiles')
+      .update({ resume_url: filename })
+      .eq('id', req.user.id)
+  } catch (err) {
+    console.error('Profile update error:', err)
+  }
 
-  res.json({ message: 'Resume parsed', skillsExtracted: extractedSkills.length, skills: extractedSkills })
+  res.json({
+    message: 'Resume parsed',
+    skillsExtracted: extractedSkills.length,
+    skills: extractedSkills
+  })
 })
 
 // GET /api/users/dashboard-stats
@@ -121,7 +200,7 @@ router.patch('/roadmap/:id', requireAuth, async (req, res) => {
     .from('user_learning_paths')
     .update({ completed, completed_at: completed ? new Date() : null })
     .eq('id', req.params.id)
-    .eq('user_id', req.user.id)   // security — only own rows
+    .eq('user_id', req.user.id)
     .select()
     .single()
   if (error) return res.status(400).json({ message: error.message })

@@ -8,6 +8,7 @@ import userRoutes  from './routes/users.js'
 import skillRoutes from './routes/skills.js'
 import jobRoutes   from './routes/jobs.js'
 import aiRoutes    from './routes/ai.js'
+import chatRouter  from './routes/chat.js'
 
 const app  = express()
 const PORT = process.env.PORT || 5000
@@ -25,6 +26,7 @@ app.use('/api/users',  userRoutes)
 app.use('/api/skills', skillRoutes)
 app.use('/api/jobs',   jobRoutes)
 app.use('/api/ai',     aiRoutes)
+app.use('/api/chat', chatRouter)
 
 // ── Health check ─────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }))
